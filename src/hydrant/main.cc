@@ -1,27 +1,11 @@
 #include <fstream>
+#include <atomic>
 #include <VMUtils/timer.hpp>
 #include <VMUtils/cmdline.hpp>
 #include <varch/utils/io.hpp>
+#include <cudafx/transfer.hpp>
 #include <thumbnail.hpp>
-#include "raycaster.hpp"
-
-struct Pixel
-{
-	void write_to( unsigned char dst[ 4 ] )
-	{
-		auto v = glm::clamp( this->v * 255.f,
-							 glm::vec4{ 0, 0, 0, 0 },
-							 glm::vec4{ 255, 255, 255, 255 } );
-		dst[ 0 ] = (unsigned char)( v.x );
-		dst[ 1 ] = (unsigned char)( v.y );
-		dst[ 2 ] = (unsigned char)( v.z );
-		dst[ 3 ] = (unsigned char)( 255 );
-	}
-
-public:
-	glm::vec4 v;
-	float t;
-};
+#include "shaders/scratch.hpp"
 
 using namespace std;
 using namespace vol;
@@ -47,14 +31,40 @@ int main( int argc, char **argv )
 	auto len = is.tellg();
 	StreamReader reader( is, 0, len );
 
+	using Shader = ChebyshevShader<ScratchIntegrator>;
+
 	Thumbnail<ThumbUnit> thumbnail( reader );
+	Shader shader;
 
 	glm::vec3 min = { 0, 0, 0 };
 	glm::vec3 max = { thumbnail.dim.x, thumbnail.dim.y, thumbnail.dim.z };
 	auto exhibit = Exhibit{}
 					 .set_center( max / 2.f )
 					 .set_size( max );
-	auto bbox = Box3D{ min, max };
+
+	shader.bbox = Box3D{ min, max };
+	shader.th_4 = thumbnail.dim.x / 4.f;
+
+	auto device = cufx::Device::scan()[ 0 ];
+	auto thumbnail_extent = cufx::Extent{}
+							  .set_width( thumbnail.dim.x )
+							  .set_height( thumbnail.dim.y )
+							  .set_depth( thumbnail.dim.z );
+	auto thumbnail_arr = device.alloc_arraynd<float2, 3>( thumbnail_extent );
+	// vm::println( "dim = {}, thumbnail_extent = {}", thumbnail.dim, thumbnail_extent );
+	auto view_info = cufx::MemoryView2DInfo{}
+					   .set_stride( thumbnail.dim.x * sizeof( float2 ) )
+					   .set_width( thumbnail.dim.x )
+					   .set_height( thumbnail.dim.y );
+	cufx::MemoryView3D<float2> thumbnail_view( thumbnail.data(), view_info, thumbnail_extent );
+	cufx::memory_transfer( thumbnail_arr, thumbnail_view ).launch();
+	auto tex_opts = cufx::Texture::Options{}
+					  .set_address_mode( cufx::Texture::AddressMode::Border )
+					  .set_filter_mode( cufx::Texture::FilterMode::None )
+					  .set_read_mode( cufx::Texture::ReadMode::Raw )
+					  .set_normalize_coords( false );
+	cufx::Texture thumbnail_texture( thumbnail_arr, tex_opts );
+	shader.thumbnail_tex = thumbnail_texture;
 
 	auto camera = Camera{};
 	if ( a.exist( "config" ) ) {
@@ -67,59 +77,23 @@ int main( int argc, char **argv )
 		camera.set_position( x, y, z );
 	}
 
-	auto th_4 = thumbnail.dim.x / 4.f;
-	cufx::Image<Pixel> image( 512, 512 );
+	cufx::Image<typename Shader::Pixel> image( 512, 512 );
+	auto device_swap = device.alloc_image_swap( image );
+	auto img_view = image.view().with_device_memory( device_swap.second );
+	img_view.copy_to_device().launch();
+
 	Raycaster raycaster;
 	{
-		double total_steps = 0;
+		std::atomic_uint64_t total_steps( 0 );
 		vm::Timer::Scoped timer( [&]( auto dt ) {
 			vm::println( "time: {}   avg_step: {}",
-						 dt.ms(), total_steps / image.get_width() / image.get_height() );
+						 dt.ms(), total_steps.load() / image.get_width() / image.get_height() );
 		} );
 
-		raycaster.cast(
-		  exhibit, camera, image,
-		  [&]( Ray const &ray ) -> Pixel {
-			  const auto nsteps = 500;
-			  const auto step = 1e-2f * th_4;
-			  const auto opacity_threshold = 0.95f;
-			  const auto density = 3e-3f;
-			  const auto cdu = 1.f / std::max( std::abs( ray.d.x ),
-											   std::max( std::abs( ray.d.y ),
-														 std::abs( ray.d.z ) ) );
-
-			  Pixel pixel = {};
-			  float tnear, tfar;
-			  if ( ray.intersect( bbox, tnear, tfar ) ) {
-				  auto p = ray.o + ray.d * tnear;
-				  int i;
-				  for ( i = 0; i < nsteps; ++i ) {
-					  p += ray.d * step;
-					  glm::vec<3, int> pt = floor( p );
-
-					  if ( !( pt.x >= 0 && pt.y >= 0 && pt.z >= 0 &&
-							  pt.x < thumbnail.dim.x && pt.y < thumbnail.dim.y && pt.z < thumbnail.dim.z ) ) {
-						  break;
-					  }
-					  if ( float cd = thumbnail[ { pt.x, pt.y, pt.z } ].chebyshev ) {
-						  float tnear, tfar;
-						  Ray{ p, ray.d }.intersect( Box3D{ pt, pt + 1 }, tnear, tfar );
-						  auto d = tfar + ( cd - 1 ) * cdu;
-						  i += d / step;
-						  p += ray.d * d;
-					  } else {
-						  auto val = thumbnail[ { pt.x, pt.y, pt.z } ].value;
-						  auto col = glm::vec4{ 1, 1, 1, 1 } * val * density;
-						  pixel.v += col * ( 1.f - pixel.v.w );
-						  if ( pixel.v.w > opacity_threshold ) break;
-					  }
-				  }
-				  total_steps += i;
-			  }
-			  //   pixel.v = float4{ ray.d.x, ray.d.y, ray.d.z, 1 };
-			  return pixel;
-		  } );
+		raycaster.cast( exhibit, camera, img_view, shader );
 	}
+
+	img_view.copy_from_device().launch();
 
 	image.dump( out );
 }
