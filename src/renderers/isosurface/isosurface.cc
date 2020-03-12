@@ -2,7 +2,7 @@
 #include <varch/thumbnail.hpp>
 #include <hydrant/double_buffering.hpp>
 #include <hydrant/rt_block_paging.hpp>
-#include "volume.hpp"
+#include "isosurface.hpp"
 
 using namespace std;
 using namespace vol;
@@ -11,16 +11,18 @@ VM_BEGIN_MODULE( hydrant )
 
 VM_EXPORT
 {
-	bool VolumeRenderer::init( std::shared_ptr<Dataset> const &dataset,
-							   RendererConfig const &cfg )
+	bool IsosurfaceRenderer::init( std::shared_ptr<Dataset> const &dataset,
+								   RendererConfig const &cfg )
 	{
 		if ( !Super::init( dataset, cfg ) ) { return false; }
 
-		auto params = cfg.params.get<VolumeRendererConfig>();
-		// shader.render_mode = params.mode == "volume" ? BrmVolume : BrmSolid;
-		shader.density = params.density;
-		transfer_fn = TransferFn( params.transfer_fn, device );
-		shader.transfer_fn = transfer_fn.sampler();
+		auto params = cfg.params.get<IsosurfaceRendererConfig>();
+		shader.isovalue = params.isovalue;
+		shader.mode = params.mode;
+
+		vm::println( "STEP = {}", shader.step );
+		vm::println( "MAX_STEPS = {}", shader.max_steps );
+		vm::println( "MARCH_DIST = {}", shader.max_steps * shader.step );
 
 		lvl0_arch = &dataset->meta.sample_levels[ 0 ].archives[ 0 ];
 
@@ -33,7 +35,7 @@ VM_EXPORT
 		return true;
 	}
 
-	cufx::Image<> VolumeRenderer::offline_render( Camera const &camera )
+	cufx::Image<> IsosurfaceRenderer::offline_render( Camera const &camera )
 	{
 		auto film = create_film();
 
@@ -136,7 +138,7 @@ VM_EXPORT
 		return film.fetch_data().dump();
 	}
 
-	void VolumeRenderer::render_loop( IRenderLoop & loop )
+	void IsosurfaceRenderer::render_loop( IRenderLoop & loop )
 	{
 		auto film = create_film();
 
@@ -160,6 +162,12 @@ VM_EXPORT
 		  [&]( auto &frame, auto frame_idx ) {
 			  std::size_t ns = 0, ns1 = 0;
 
+			  shader.to_world = inverse( exhibit.get_iet() );
+			  shader.light_pos = loop.camera.position +
+								 loop.camera.target +
+								 loop.camera.up +
+								 cross( loop.camera.target, loop.camera.up );
+			  shader.eye_pos = loop.camera.position;
 			  shader.paging = srv.update( culler, loop.camera );
 
 			  {
@@ -178,7 +186,8 @@ VM_EXPORT
 				  raycaster.pixel_pass( film.view(),
 										frame.view(),
 										shader,
-										opts );
+										opts,
+										clear_color );
 			  }
 		  },
 		  [&]( auto &frame, auto frame_idx ) {
@@ -191,7 +200,7 @@ VM_EXPORT
 		srv.stop();
 	}
 
-	REGISTER_RENDERER( VolumeRenderer, "Volume" );
+	REGISTER_RENDERER( IsosurfaceRenderer, "Isosurface" );
 }
 
 VM_END_MODULE()

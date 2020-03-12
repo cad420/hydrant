@@ -11,10 +11,16 @@ VM_BEGIN_MODULE( hydrant )
 
 VM_EXPORT
 {
-	struct VolumeShader : IShader<StdVec4Pixel>
+	VM_ENUM( IsosurfaceRenderMode,
+			 Color, Normal, Position );
+
+	struct IsosurfaceShader : IShader<StdVec4Pixel>
 	{
-		float density;
-		Sampler transfer_fn;
+		IsosurfaceRenderMode mode;
+		mat4 to_world;
+		vec3 eye_pos;
+		vec3 light_pos;
+		float isovalue;
 		Sampler chebyshev;
 		RtBlockPagingClient paging;
 	};
