@@ -5,9 +5,10 @@
 #include <cppfs/FilePath.h>
 #include <VMUtils/enum.hpp>
 #include <varch/package_meta.hpp>
-#include <hydrant/core/glm_math.hpp>
 #include <hydrant/core/raycaster.hpp>
 #include <hydrant/core/render_loop.hpp>
+#include <hydrant/core/renderer.schema.hpp>
+#include <hydrant/mpi_utils.hpp>
 
 VM_BEGIN_MODULE( hydrant )
 
@@ -19,20 +20,12 @@ VM_EXPORT
 		VM_DEFINE_ATTRIBUTE( cppfs::FilePath, root );
 	};
 
-	struct RendererConfig : vm::json::Serializable<RendererConfig>
+	struct RealtimeRenderOptions
 	{
-		VM_JSON_FIELD( glm::ivec2, resolution ) = { 512, 512 };
-		VM_JSON_FIELD( std::string, renderer );
-		VM_JSON_FIELD( vm::json::Any, params ) = vm::json::Any();
+		VM_DEFINE_ATTRIBUTE( MpiComm, comm );
+		VM_DEFINE_ATTRIBUTE( RealtimeRenderQuality, quality ) = RealtimeRenderQuality::Dynamic;
 	};
 
-	VM_ENUM( RealtimeRenderQuality,
-			 Lossless, Dynamic );
-
-	struct RealtimeRenderOptions : vm::json::Serializable<RealtimeRenderOptions>
-	{
-		VM_JSON_FIELD( RealtimeRenderQuality, quality ) = RealtimeRenderQuality::Dynamic;
-	};
 
 	struct IRenderer : vm::Dynamic
 	{
@@ -76,11 +69,7 @@ VM_EXPORT
 
 struct RendererRegistry
 {
-	static RendererRegistry &instance()
-	{
-		static RendererRegistry _;
-		return _;
-	}
+	static RendererRegistry &instance() { static RendererRegistry _; return _; }
 
 	std::map<std::string, std::function<IRenderer *()>> types;
 };
@@ -91,12 +80,12 @@ struct RendererRegistry
 #define REGISTER_RENDERER_UNIQ_HELPER( ctr, T, name ) \
 	REGISTER_RENDERER_UNIQ( ctr, T, name )
 
-#define REGISTER_RENDERER_UNIQ( ctr, T, name )                               \
-	static int                                                               \
-	  renderer_registrar__body__##ctr##__object =                            \
-		(                                                                    \
-		  ::hydrant::__inner__::RendererRegistry::instance().types[ name ] = \
-			[]() -> ::hydrant::IRenderer * { return new T; },                \
+#define REGISTER_RENDERER_UNIQ( ctr, T, name )                             \
+	static int                                                             \
+	  renderer_registrar__body__##ctr##__object =                          \
+		(                                                                  \
+		 ::hydrant::__inner__::RendererRegistry::instance().types[ name ] = \
+			[]() -> ::hydrant::IRenderer * { return new T; },              \
 		  0 )
 
 VM_END_MODULE()

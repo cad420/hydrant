@@ -1,6 +1,5 @@
 #pragma once
 
-#include <regex>
 #include <glog/logging.h>
 #include <varch/thumbnail.hpp>
 #include <cudafx/device.hpp>
@@ -8,6 +7,7 @@
 #include <hydrant/core/renderer.hpp>
 #include <hydrant/bridge/texture_3d.hpp>
 #include <hydrant/core/render_loop.hpp>
+#include <hydrant/basic_renderer.schema.hpp>
 
 VM_BEGIN_MODULE( hydrant )
 
@@ -27,14 +27,6 @@ VM_EXPORT
 		friend struct BasicRenderer;
 	};
 
-	struct BasicRendererParams : vm::json::Serializable<BasicRendererParams>
-	{
-		VM_JSON_FIELD( ShadingDevice, device ) = ShadingDevice::Cuda;
-		VM_JSON_FIELD( std::string, device_filter ) = ".*";
-		VM_JSON_FIELD( int, max_steps ) = 500;
-		VM_JSON_FIELD( vec3, clear_color ) = vec3( 0 );
-	};
-
 	struct OfflineRenderCtx : vm::Dynamic
 	{
 	};
@@ -49,21 +41,16 @@ VM_EXPORT
 
 			auto params = cfg.params.get<BasicRendererParams>();
 			if ( params.device == ShadingDevice::Cuda ) {
-				try {
-					std::regex filter( params.device_filter );
-					auto devices = cufx::Device::scan();
-					for ( auto &device : devices ) {
-						auto props = device.props();
-						if ( std::regex_match( props.name, filter ) ) {
-							LOG( INFO ) << vm::fmt( "{}", props.name );
-						}
+				auto devices = cufx::Device::scan();
+				if ( !devices.size() ) {
+					LOG( ERROR ) << vm::fmt( "cuda device not found, fallback to cpu render mode" );
+				} else {
+					if ( params.comm_rank >= devices.size() ) {
+						LOG( FATAL ) << vm::fmt( "comm_rank >= devices.size()" );
+					} else {
+						device = devices[ params.comm_rank ];
+						lk = device.value().lock();
 					}
-					device = cufx::Device::get_default();
-					if ( !device.has_value() ) {
-						LOG( ERROR ) << vm::fmt( "cuda device not found, fallback to cpu render mode" );
-					}
-				} catch ( std::regex_error &e ) {
-					LOG( FATAL ) << vm::fmt( "invalid regex: '{}'", params.device_filter );
 				}
 			}
 			shader.max_steps = params.max_steps;
@@ -99,6 +86,10 @@ VM_EXPORT
 	public:
 		cufx::Image<> offline_render( Camera const &camera ) override final
 		{
+			vm::Option<cufx::Device::Lock> lk;
+			if ( device.has_value() ) {
+				lk = device.value().lock();
+			}
 			std::unique_ptr<OfflineRenderCtx> pctx( create_offline_render_ctx() );
 			return offline_render_ctxed( *pctx, camera );
 		}
@@ -106,23 +97,30 @@ VM_EXPORT
 	protected:
 		virtual cufx::Image<> offline_render_ctxed( OfflineRenderCtx &ctx, Camera const &camera ) = 0;
 
-		virtual OfflineRenderCtx *create_offline_render_ctx() { return new OfflineRenderCtx; }
+		virtual OfflineRenderCtx *create_offline_render_ctx()
+		{
+			return new OfflineRenderCtx;
+		}
 
 	public:
 		void realtime_render( IRenderLoop &loop, RealtimeRenderOptions const &opts ) override final
 		{
+			vm::Option<cufx::Device::Lock> lk;
+			if ( device.has_value() ) {
+				lk = device.value().lock();
+			}
 			switch ( opts.quality._to_integral() ) {
 			case RealtimeRenderQuality::Lossless: {
-				realtime_render_lossless( loop );
+				realtime_render_lossless( loop, opts.comm );
 			} break;
 			case RealtimeRenderQuality::Dynamic: {
-				realtime_render_dynamic( loop );
+				realtime_render_dynamic( loop, opts.comm );
 			} break;
 			}
 		}
 
 	protected:
-		void realtime_render_default( IRenderLoop &loop )
+		void realtime_render_default( IRenderLoop &loop, MpiComm const &comm )
 		{
 			std::unique_ptr<OfflineRenderCtx> pctx( create_offline_render_ctx() );
 			loop.post_loop();
@@ -135,9 +133,15 @@ VM_EXPORT
 			loop.after_loop();
 		}
 
-		virtual void realtime_render_lossless( IRenderLoop &loop ) { realtime_render_default( loop ); }
+		virtual void realtime_render_lossless( IRenderLoop &loop, MpiComm const &comm )
+		{
+			realtime_render_default( loop, comm );
+		}
 
-		virtual void realtime_render_dynamic( IRenderLoop &loop ) { realtime_render_default( loop ); }
+		virtual void realtime_render_dynamic( IRenderLoop &loop, MpiComm const &comm )
+		{
+			realtime_render_default( loop, comm );
+		}
 
 	public:
 		template <typename T>
@@ -168,6 +172,8 @@ VM_EXPORT
 		uvec3 dim;
 		Shader shader;
 		Exhibit exhibit;
+	private:
+		vm::Option<cufx::Device::Lock> lk;
 	};
 }
 
