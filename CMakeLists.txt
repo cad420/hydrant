@@ -12,6 +12,8 @@ execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive)
 # install external modules
 include(scripts/external.cmake)
 
+#find_package(OpenMP REQUIRED)
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 find_package(CUDA REQUIRED)
 set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE ON)
 set(CUDA_SEPARABLE_COMPILATION ON)
@@ -47,12 +49,6 @@ include_directories(
   ${PROJECT_SOURCE_DIR}/ui
 )
 
-function(install_mod module)
-  install(TARGETS ${module}
-    LIBRARY DESTINATION mods
-  )
-endfunction()
-
 add_subdirectory(src)
 
 install(FILES README.md 
@@ -64,6 +60,6 @@ install(DIRECTORY configs
   DESTINATION .
   COMPONENT runtime
 )
-install(FILES build_dataset.sh
+install(FILES build_dataset.sh infer_dimension.pl
   DESTINATION .
 )

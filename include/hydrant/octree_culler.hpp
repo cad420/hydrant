@@ -37,6 +37,14 @@ struct Frustum
 				}
 			}
 		}
+		auto b3d = Box3D{}.set_min( bbox.min ).set_max( bbox.max );
+		for ( int i = 0; i != 4; ++i ) {
+			auto ray = Ray{}.set_o( orig ).set_d( normalize( border[ i ] ) );
+			float tnear, tfar;
+			if ( ray.intersect( b3d, tnear, tfar ) && tfar > 0.f ) {
+				return true;
+			}
+		}
 		return false;
 	}
 
@@ -61,6 +69,7 @@ struct Frustum
 
 public:
 	std::array<vec3, 4> norm;
+	std::array<vec3, 4> border;
 	vec3 orig;
 };
 
@@ -104,11 +113,13 @@ VM_EXPORT
 			{
 				this->bbox = bbox;
 			} else {
-				LOG( FATAL ) << vm::fmt( "invalid bbox: {}", std::make_pair( bbox.min, bbox.max ) );
+				LOG( FATAL ) << vm::fmt( "invalid bbox = {}; with dim ={}",
+										 std::make_pair( bbox.min, bbox.max ), dim );
 			}
 		}
 
 		const std::vector<vol::Idx> &cull( Camera const &camera,
+										   std::function<float( vol::Idx const & )> *dist_fn = nullptr,
 										   std::size_t limit = std::numeric_limits<std::size_t>::max(),
 										   ScreenRect const &rect = ScreenRect{} )
 		{
@@ -132,17 +143,27 @@ VM_EXPORT
 					}
 				}
 			}
+			auto df = [orig=frust.orig]( vol::Idx const &idx ) {
+				return distance2( orig,
+								  vec3( idx.x, idx.y, idx.z ) + .5f );
+			};
+			if ( dist_fn ) { *dist_fn = df; }
 			auto length = std::min( limit, buf.size() );
 			std::nth_element(
 			  buf.begin(), buf.begin() + length, buf.end(),
 			  [&]( auto &a, auto &b ) {
-				  return distance2( frust.orig, vec3( a.x, a.y, a.z ) + .5f ) <
-						 distance2( frust.orig, vec3( b.x, b.y, b.z ) + .5f );
+				  return df( a ) < df( b );
 			  } );
 			// vm::println( "{}", frust.norm[ 0 ].o );
 			buf.resize( length );
 			std::sort( buf.begin(), buf.end() );
 			return buf;
+		}
+
+		vec3 get_orig( Camera camera ) const
+		{
+			auto itrans = exhibit.get_iet() * camera.get_ivt();
+			return itrans * vec4( 0, 0, 0, 1 );
 		}
 
 	private:
@@ -170,19 +191,17 @@ VM_EXPORT
 							  ScreenRect const &rect,
 							  mat4 const &trans ) const
 		{
-			vec3 border[ 4 ] = {
-				{ rect.max.x, rect.max.y, -camera.ctg_fovy_2 },
-				{ rect.max.x, rect.min.y, -camera.ctg_fovy_2 },
-				{ rect.min.x, rect.min.y, -camera.ctg_fovy_2 },
-				{ rect.min.x, rect.max.y, -camera.ctg_fovy_2 },
-			};
-
 			Frustum frust;
+			frust.border[ 0 ] = vec3{ rect.max.x, rect.max.y, -camera.ctg_fovy_2 };
+			frust.border[ 1 ] = vec3{ rect.max.x, rect.min.y, -camera.ctg_fovy_2 };
+			frust.border[ 2 ] = vec3{ rect.min.x, rect.min.y, -camera.ctg_fovy_2 };
+			frust.border[ 3 ] = vec3{ rect.min.x, rect.max.y, -camera.ctg_fovy_2 };
+
 			frust.orig = vec3( 0 );
-			frust.norm[ 0 ] = cross( border[ 0 ], border[ 1 ] );
-			frust.norm[ 1 ] = cross( border[ 1 ], border[ 2 ] );
-			frust.norm[ 2 ] = cross( border[ 2 ], border[ 3 ] );
-			frust.norm[ 3 ] = cross( border[ 3 ], border[ 0 ] );
+			frust.norm[ 0 ] = cross( frust.border[ 0 ], frust.border[ 1 ] );
+			frust.norm[ 1 ] = cross( frust.border[ 1 ], frust.border[ 2 ] );
+			frust.norm[ 2 ] = cross( frust.border[ 2 ], frust.border[ 3 ] );
+			frust.norm[ 3 ] = cross( frust.border[ 3 ], frust.border[ 0 ] );
 
 			frust.orig = trans * vec4( frust.orig, 1 );
 			for ( auto &norm : frust.norm ) {

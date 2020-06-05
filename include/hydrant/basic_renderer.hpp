@@ -53,26 +53,25 @@ VM_EXPORT
 					}
 				}
 			}
-			shader.max_steps = params.max_steps;
-			clear_color = params.clear_color;
 
 			auto &lvl0 = dataset->meta.sample_levels[ 0 ];
-			auto &lvl0_arch = lvl0.archives[ 0 ];
-			auto lvl0_blksz = float( lvl0_arch.block_size );
-			dim = vec3( lvl0_arch.dim.x,
-						lvl0_arch.dim.y,
-						lvl0_arch.dim.z );
+			auto blksz = float( dataset->meta.block_size );
+			dim = vec3( lvl0.dim.x,
+						lvl0.dim.y,
+						lvl0.dim.z );
 			auto raw = vec3( lvl0.raw.x,
 							 lvl0.raw.y,
 							 lvl0.raw.z );
-			auto f_dim = raw / lvl0_blksz;
+			auto f_dim = raw / blksz;
 			exhibit = Exhibit{}
 						.set_center( f_dim / 2.f )
 						.set_size( f_dim );
 
 			shader.bbox = Box3D{ { 0, 0, 0 }, f_dim };
-			shader.step = .3f / lvl0_blksz;
+			shader.du = 1.f / blksz;
 
+			update( cfg.params );
+			
 			return true;
 		}
 
@@ -80,6 +79,7 @@ VM_EXPORT
 		{
 			auto params = params_in.get<BasicRendererParams>();
 			shader.max_steps = params.max_steps;
+			shader.step = shader.du / 4.f / params.sample_rate;
 			clear_color = params.clear_color;
 		}
 
